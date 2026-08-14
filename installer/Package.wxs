@@ -1,0 +1,59 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="QuickYeet" Manufacturer="QuickYeet" Version="0.2.2"
+           UpgradeCode="{73E677CC-F532-4DC9-A8E3-F17514494080}" Scope="perMachine">
+    <SummaryInformation Description="QuickYeet Explorer context-menu extension" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of QuickYeet is already installed." />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="QuickYeet">
+        <Component Id="QuickYeetModernShellComponent" Guid="{4ACA2E74-E739-44BA-BE4A-FC13B2B43788}" Bitness="always64">
+          <File Id="QuickYeetModernShellFile" Name="QuickYeetModernShell.dll"
+                Source="$(var.ShellBinary)" KeyPath="yes" />
+          <File Id="QuickYeetPopupFile" Source="$(var.PopupBinary)" />
+          <File Id="QuickYeetRegistrarFile" Source="$(var.PackageRegistrar)" />
+          <File Id="QuickYeetIdentityFile" Name="QuickYeet.Identity.msix" Source="$(var.IdentityPackage)" />
+          <RemoveRegistryKey Id="RemoveLegacyQuickYeetClsid"
+                             Root="HKLM"
+                             Key="Software\Classes\CLSID\{3DF187D7-6A2E-4E81-87C4-6B0D28A49678}"
+                             Action="removeOnInstall" />
+          <RemoveRegistryKey Id="RemoveLegacyQuickYeetContextMenuHandler"
+                             Root="HKLM"
+                             Key="Software\Classes\*\shellex\ContextMenuHandlers\QuickYeet"
+                             Action="removeOnInstall" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Binary Id="QuickYeetRegistrarBinary" SourceFile="$(var.PackageRegistrar)" />
+
+    <CustomAction Id="MigrateQuickYeetConfig"
+                  BinaryRef="QuickYeetRegistrarBinary"
+                  ExeCommand="migrate-config &quot;[LocalAppDataFolder]&quot;"
+                  Execute="immediate" Impersonate="yes" Return="check" />
+
+    <CustomAction Id="RegisterQuickYeetIdentity"
+                  FileRef="QuickYeetRegistrarFile"
+                  ExeCommand="register &quot;[#QuickYeetIdentityFile]&quot; &quot;[INSTALLFOLDER]&quot;"
+                  Execute="deferred" Impersonate="yes" Return="check" />
+    <CustomAction Id="RollbackQuickYeetIdentity"
+                  FileRef="QuickYeetRegistrarFile"
+                  ExeCommand="unregister"
+                  Execute="rollback" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="UnregisterQuickYeetIdentity"
+                  FileRef="QuickYeetRegistrarFile"
+                  ExeCommand="unregister"
+                  Execute="deferred" Impersonate="yes" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="MigrateQuickYeetConfig" Before="InstallInitialize" Condition="WIX_UPGRADE_DETECTED" />
+      <Custom Action="RollbackQuickYeetIdentity" Before="RegisterQuickYeetIdentity" Condition="NOT Installed" />
+      <Custom Action="RegisterQuickYeetIdentity" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="UnregisterQuickYeetIdentity" Before="RemoveFiles"
+              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build and Install QuickYeet"
+  short_description: "Build, sign, install, and verify QuickYeet"
+  default_prompt: "Use $quickyeet-build-and-install to compile, sign, install, and verify QuickYeet locally."

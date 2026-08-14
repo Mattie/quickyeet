@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+# Windows command files keep native line endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sln text eol=crlf
+
+# Binary release and signing files must never be line-ending normalized.
+*.cer binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.msi binary
+*.msix binary
+*.pfx binary
+*.png binary

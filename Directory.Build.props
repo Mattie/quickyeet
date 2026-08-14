@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectExtension)' == '.vcxproj'">
+    <WindowsTargetPlatformVersion>10.0.22000.0</WindowsTargetPlatformVersion>
+    <PlatformToolset>v143</PlatformToolset>
+    <OutDir>$(MSBuildThisFileDirectory)artifacts\$(Configuration)\$(Platform)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)artifacts\obj\$(MSBuildProjectName)\$(Configuration)\$(Platform)\</IntDir>
+  </PropertyGroup>
+</Project>

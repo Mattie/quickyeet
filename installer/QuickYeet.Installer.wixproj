@@ -1,0 +1,11 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputName>QuickYeet</OutputName>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <ShellBinary Condition="'$(ShellBinary)' == ''">$(MSBuildThisFileDirectory)..\artifacts\Release\x64\QuickYeetShell.dll</ShellBinary>
+    <PopupBinary Condition="'$(PopupBinary)' == ''">$(MSBuildThisFileDirectory)..\artifacts\Release\x64\QuickYeetPopup.exe</PopupBinary>
+    <PackageRegistrar Condition="'$(PackageRegistrar)' == ''">$(MSBuildThisFileDirectory)..\artifacts\Release\x64\QuickYeetPackageRegistrar.exe</PackageRegistrar>
+    <IdentityPackage Condition="'$(IdentityPackage)' == ''">$(MSBuildThisFileDirectory)..\artifacts\Release\x64\QuickYeet.Identity.msix</IdentityPackage>
+    <DefineConstants>ShellBinary=$(ShellBinary);PopupBinary=$(PopupBinary);PackageRegistrar=$(PackageRegistrar);IdentityPackage=$(IdentityPackage)</DefineConstants>
+  </PropertyGroup>
+</Project>
