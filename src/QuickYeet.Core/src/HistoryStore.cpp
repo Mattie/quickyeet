@@ -110,7 +110,7 @@ std::optional<std::wstring> ConfigMutexName(const fs::path& storage_path,
         hash ^= static_cast<std::uint64_t>(character);
         hash *= prime;
     }
-    return L"Local\\QuickYeet.Config." + std::to_wstring(hash);
+    return L"Global\\QuickYeet.Config." + std::to_wstring(hash);
 }
 
 class ConfigWriteLock {
