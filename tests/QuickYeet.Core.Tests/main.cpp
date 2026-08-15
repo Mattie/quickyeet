@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +13,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -387,6 +389,39 @@ void PreservesConcurrentDestinationRemovals() {
             "Stale alias and pin edits should not recreate a concurrently removed destination");
 }
 
+void WaitsForConfigurationFileLock() {
+    TemporaryDirectory temporary;
+    const fs::path config_path = temporary.path() / L"config.yaml";
+    fs::path lock_path = config_path;
+    lock_path += L".lock";
+    const HANDLE lock = CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                    OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr);
+    Require(lock != INVALID_HANDLE_VALUE, "The test should acquire the configuration lock file");
+
+    quickyeet::HistoryStore history(config_path);
+    history.RecordUse(temporary.path() / L"Destination", 1'000);
+    std::atomic<bool> save_started = false;
+    bool saved = false;
+    std::wstring error;
+    std::thread saver([&] {
+        save_started.store(true);
+        saved = history.Save(&error);
+    });
+
+    while (!save_started.load()) {
+        Sleep(1);
+    }
+    const DWORD locked_wait_result = WaitForSingleObject(saver.native_handle(), 100);
+    const bool wrote_while_locked = fs::exists(config_path);
+    CloseHandle(lock);
+    saver.join();
+
+    Require(locked_wait_result == WAIT_TIMEOUT,
+            "A save should remain blocked while another action holds the file lock");
+    Require(!wrote_while_locked, "A save should wait while another action holds the file lock");
+    Require(saved, "A waiting save should finish after the file lock is released");
+}
+
 void LoadsManuallyOrderedYamlConfig() {
     TemporaryDirectory temporary;
     const fs::path config_path = temporary.path() / L"config.yaml";
@@ -597,6 +632,7 @@ int wmain() {
         {"persists local destination config", PersistsLocalDestinationConfig},
         {"merges concurrent destination updates", MergesConcurrentDestinationUpdates},
         {"preserves concurrent destination removals", PreservesConcurrentDestinationRemovals},
+        {"waits for configuration file lock", WaitsForConfigurationFileLock},
         {"loads manually ordered YAML config", LoadsManuallyOrderedYamlConfig},
         {"persists empty YAML config", PersistsEmptyYamlConfig},
         {"defaults Recycle Bin option on", DefaultsRecycleBinOptionOn},

@@ -74,78 +74,45 @@ void SetError(std::wstring* error, const std::wstring& value) {
     }
 }
 
-std::optional<std::wstring> ConfigMutexName(const fs::path& storage_path,
-                                            std::wstring* error) {
-    std::error_code absolute_error;
-    fs::path normalized = fs::absolute(storage_path, absolute_error);
-    if (absolute_error) {
-        normalized = storage_path;
-    }
-    std::wstring identity = normalized.lexically_normal().wstring();
-    if (!identity.empty()) {
-        const int lowercase_length =
-            LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, identity.data(),
-                          static_cast<int>(identity.size()), nullptr, 0, nullptr, nullptr, 0);
-        if (lowercase_length <= 0) {
-            SetError(error, L"QuickYeet could not normalize its configuration lock name: " +
-                                WindowsErrorMessage(GetLastError()));
-            return std::nullopt;
-        }
-
-        std::wstring lowercase_identity(lowercase_length, L'\0');
-        if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, identity.data(),
-                          static_cast<int>(identity.size()), lowercase_identity.data(),
-                          lowercase_length, nullptr, nullptr, 0) != lowercase_length) {
-            SetError(error, L"QuickYeet could not normalize its configuration lock name: " +
-                                WindowsErrorMessage(GetLastError()));
-            return std::nullopt;
-        }
-        identity = std::move(lowercase_identity);
-    }
-
-    constexpr std::uint64_t offset = 14'695'981'039'346'656'037ULL;
-    constexpr std::uint64_t prime = 1'099'511'628'211ULL;
-    std::uint64_t hash = offset;
-    for (const wchar_t character : identity) {
-        hash ^= static_cast<std::uint64_t>(character);
-        hash *= prime;
-    }
-    return L"Global\\QuickYeet.Config." + std::to_wstring(hash);
-}
-
 class ConfigWriteLock {
 public:
     ConfigWriteLock(const fs::path& storage_path, std::wstring* error) {
-        const auto name = ConfigMutexName(storage_path, error);
-        if (!name.has_value()) {
-            return;
-        }
-        handle_ = CreateMutexW(nullptr, FALSE, name->c_str());
-        if (handle_ == nullptr) {
-            SetError(error, L"QuickYeet could not create its configuration lock: " +
-                                WindowsErrorMessage(GetLastError()));
+        std::error_code directory_error;
+        fs::create_directories(storage_path.parent_path(), directory_error);
+        if (directory_error) {
+            SetError(error, L"QuickYeet could not create its local configuration folder.");
             return;
         }
 
-        constexpr DWORD wait_timeout_ms = 15'000;
-        const DWORD wait_result = WaitForSingleObject(handle_, wait_timeout_ms);
-        if (wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED) {
-            acquired_ = true;
-            return;
-        }
-        if (wait_result == WAIT_TIMEOUT) {
-            SetError(error, L"QuickYeet timed out waiting to update its configuration.");
-        } else {
-            SetError(error, L"QuickYeet could not lock its configuration: " +
-                                WindowsErrorMessage(GetLastError()));
+        fs::path lock_path = storage_path;
+        lock_path += L".lock";
+        constexpr ULONGLONG wait_timeout_ms = 15'000;
+        constexpr DWORD retry_delay_ms = 25;
+        const ULONGLONG deadline = GetTickCount64() + wait_timeout_ms;
+        for (;;) {
+            handle_ = CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                  OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr);
+            if (handle_ != INVALID_HANDLE_VALUE) {
+                acquired_ = true;
+                return;
+            }
+
+            const DWORD lock_error = GetLastError();
+            if (lock_error != ERROR_SHARING_VIOLATION && lock_error != ERROR_LOCK_VIOLATION) {
+                SetError(error, L"QuickYeet could not lock its configuration: " +
+                                    WindowsErrorMessage(lock_error));
+                return;
+            }
+            if (GetTickCount64() >= deadline) {
+                SetError(error, L"QuickYeet timed out waiting to update its configuration.");
+                return;
+            }
+            Sleep(retry_delay_ms);
         }
     }
 
     ~ConfigWriteLock() {
-        if (acquired_) {
-            ReleaseMutex(handle_);
-        }
-        if (handle_ != nullptr) {
+        if (handle_ != INVALID_HANDLE_VALUE) {
             CloseHandle(handle_);
         }
     }
@@ -156,7 +123,7 @@ public:
     [[nodiscard]] bool acquired() const noexcept { return acquired_; }
 
 private:
-    HANDLE handle_ = nullptr;
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
     bool acquired_ = false;
 };
 
