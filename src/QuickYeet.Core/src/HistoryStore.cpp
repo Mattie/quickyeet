@@ -740,12 +740,19 @@ bool HistoryStore::WriteConfiguration(std::wstring* error) const {
     return true;
 }
 
-DestinationRecord& HistoryStore::Upsert(const fs::path& path) {
-    const fs::path normalized = NormalizeDestinationPath(path);
+DestinationRecord* HistoryStore::FindExisting(const fs::path& normalized_path) {
     const auto existing = std::find_if(records_.begin(), records_.end(), [&](const DestinationRecord& record) {
-        return SamePath(record.path, normalized);
+        return SamePath(record.path, normalized_path);
     });
     if (existing != records_.end()) {
+        return &*existing;
+    }
+    return nullptr;
+}
+
+DestinationRecord& HistoryStore::Upsert(const fs::path& path) {
+    const fs::path normalized = NormalizeDestinationPath(path);
+    if (DestinationRecord* existing = FindExisting(normalized)) {
         return *existing;
     }
     records_.push_back({normalized});
@@ -760,12 +767,26 @@ void HistoryStore::ApplyMutation(const PendingMutation& mutation) {
             record.last_used = std::max(record.last_used, mutation.used_at);
             break;
         }
-        case MutationKind::set_pinned:
-            Upsert(mutation.path).pinned = mutation.pinned;
+        case MutationKind::set_pinned: {
+            DestinationRecord* record = FindExisting(mutation.path);
+            if (record == nullptr && !mutation.requires_existing_record) {
+                record = &Upsert(mutation.path);
+            }
+            if (record != nullptr) {
+                record->pinned = mutation.pinned;
+            }
             break;
-        case MutationKind::set_alias:
-            Upsert(mutation.path).alias = mutation.alias;
+        }
+        case MutationKind::set_alias: {
+            DestinationRecord* record = FindExisting(mutation.path);
+            if (record == nullptr && !mutation.requires_existing_record) {
+                record = &Upsert(mutation.path);
+            }
+            if (record != nullptr) {
+                record->alias = mutation.alias;
+            }
             break;
+        }
         case MutationKind::remove: {
             records_.erase(std::remove_if(records_.begin(), records_.end(),
                                           [&](const DestinationRecord& record) {
@@ -787,6 +808,7 @@ void HistoryStore::RecordUse(const fs::path& path, const std::int64_t used_at) {
 void HistoryStore::SetPinned(const fs::path& path, const bool pinned) {
     PendingMutation mutation{MutationKind::set_pinned, NormalizeDestinationPath(path)};
     mutation.pinned = pinned;
+    mutation.requires_existing_record = FindExisting(mutation.path) != nullptr;
     ApplyMutation(mutation);
     pending_mutations_.push_back(std::move(mutation));
 }
@@ -794,6 +816,7 @@ void HistoryStore::SetPinned(const fs::path& path, const bool pinned) {
 void HistoryStore::SetAlias(const fs::path& path, std::wstring alias) {
     PendingMutation mutation{MutationKind::set_alias, NormalizeDestinationPath(path)};
     mutation.alias = CleanAlias(std::move(alias));
+    mutation.requires_existing_record = FindExisting(mutation.path) != nullptr;
     ApplyMutation(mutation);
     pending_mutations_.push_back(std::move(mutation));
 }

@@ -56,9 +56,11 @@ private:
         std::filesystem::path path;
         std::int64_t used_at = 0;
         bool pinned = false;
+        bool requires_existing_record = false;
         std::wstring alias;
     };
 
+    DestinationRecord* FindExisting(const std::filesystem::path& normalized_path);
     DestinationRecord& Upsert(const std::filesystem::path& path);
     void ApplyMutation(const PendingMutation& mutation);
     bool WriteConfiguration(std::wstring* error) const;

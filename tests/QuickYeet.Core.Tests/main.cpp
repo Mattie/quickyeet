@@ -357,6 +357,36 @@ void MergesConcurrentDestinationUpdates() {
             "A destination added by another action should survive a stale save");
 }
 
+void PreservesConcurrentDestinationRemovals() {
+    TemporaryDirectory temporary;
+    const fs::path config_path = temporary.path() / L"config.yaml";
+    const fs::path destination = temporary.path() / L"Client Work";
+    fs::create_directories(destination);
+
+    quickyeet::HistoryStore initial(config_path);
+    initial.RecordUse(destination, 1'000);
+    std::wstring error;
+    Require(initial.Save(&error), "The initial destination configuration should save");
+
+    quickyeet::HistoryStore remove_action(config_path);
+    quickyeet::HistoryStore stale_metadata_action(config_path);
+    Require(remove_action.Load(&error) && stale_metadata_action.Load(&error),
+            "Concurrent actions should start from the same destination configuration");
+
+    Require(remove_action.Remove(destination), "The remove action should find the destination");
+    stale_metadata_action.SetAlias(destination, L"Stale alias");
+    stale_metadata_action.SetPinned(destination, true);
+
+    Require(remove_action.Save(&error), "The remove action should save");
+    Require(stale_metadata_action.Save(&error),
+            "Stale destination metadata should merge without recreating a removal");
+
+    quickyeet::HistoryStore merged(config_path);
+    Require(merged.Load(&error), "The merged destination configuration should load");
+    Require(!merged.Find(destination).has_value(),
+            "Stale alias and pin edits should not recreate a concurrently removed destination");
+}
+
 void LoadsManuallyOrderedYamlConfig() {
     TemporaryDirectory temporary;
     const fs::path config_path = temporary.path() / L"config.yaml";
@@ -566,6 +596,7 @@ int wmain() {
         {"preserves migration source on failure", LeavesMigrationSourceIntactWhenDestinationFails},
         {"persists local destination config", PersistsLocalDestinationConfig},
         {"merges concurrent destination updates", MergesConcurrentDestinationUpdates},
+        {"preserves concurrent destination removals", PreservesConcurrentDestinationRemovals},
         {"loads manually ordered YAML config", LoadsManuallyOrderedYamlConfig},
         {"persists empty YAML config", PersistsEmptyYamlConfig},
         {"defaults Recycle Bin option on", DefaultsRecycleBinOptionOn},
