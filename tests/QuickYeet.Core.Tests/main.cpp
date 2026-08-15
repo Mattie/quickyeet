@@ -318,6 +318,45 @@ void PersistsLocalDestinationConfig() {
             "The saved destination configuration should be readable YAML");
 }
 
+void MergesConcurrentDestinationUpdates() {
+    TemporaryDirectory temporary;
+    const fs::path config_path = temporary.path() / L"config.yaml";
+    const fs::path client_work = temporary.path() / L"Client Work";
+    const fs::path archive = temporary.path() / L"Archive";
+    fs::create_directories(client_work);
+    fs::create_directories(archive);
+
+    quickyeet::HistoryStore initial(config_path);
+    initial.RecordUse(client_work, 1'000);
+    std::wstring error;
+    Require(initial.Save(&error), "The initial destination configuration should save");
+
+    quickyeet::HistoryStore move_action(config_path);
+    quickyeet::HistoryStore stale_action(config_path);
+    Require(move_action.Load(&error) && stale_action.Load(&error),
+            "Concurrent actions should start from the same saved configuration");
+
+    move_action.RecordUse(client_work, 2'000);
+    move_action.RecordUse(archive, 2'000);
+    stale_action.RecordUse(client_work, 1'500);
+    stale_action.SetAlias(client_work, L"Active client");
+    stale_action.SetPinned(client_work, true);
+
+    Require(move_action.Save(&error), "The move action should save its destination history");
+    Require(stale_action.Save(&error), "A stale action should merge with the newer history");
+
+    quickyeet::HistoryStore merged(config_path);
+    Require(merged.Load(&error), "The merged destination configuration should load");
+    const auto client_record = merged.Find(client_work);
+    const auto archive_record = merged.Find(archive);
+    Require(client_record.has_value() && client_record->use_count == 3 &&
+                client_record->last_used == 2'000 && client_record->pinned &&
+                client_record->alias == L"Active client",
+            "Concurrent usage, alias, and pin updates should all survive");
+    Require(archive_record.has_value() && archive_record->use_count == 1,
+            "A destination added by another action should survive a stale save");
+}
+
 void LoadsManuallyOrderedYamlConfig() {
     TemporaryDirectory temporary;
     const fs::path config_path = temporary.path() / L"config.yaml";
@@ -526,6 +565,7 @@ int wmain() {
         {"numbers conflicting migration backups", NumbersConflictingMigrationBackups},
         {"preserves migration source on failure", LeavesMigrationSourceIntactWhenDestinationFails},
         {"persists local destination config", PersistsLocalDestinationConfig},
+        {"merges concurrent destination updates", MergesConcurrentDestinationUpdates},
         {"loads manually ordered YAML config", LoadsManuallyOrderedYamlConfig},
         {"persists empty YAML config", PersistsEmptyYamlConfig},
         {"defaults Recycle Bin option on", DefaultsRecycleBinOptionOn},

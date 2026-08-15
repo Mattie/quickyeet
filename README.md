@@ -95,6 +95,7 @@ D:\Archive\
 
 ## Changelog
 
+- Prevented concurrent actions from overwriting destination settings.
 - Added in-place MSI upgrades.
 - Isolated Explorer contract tests from local configuration and hardened source-control defaults for line endings and local signing passwords.
 - Resolved an issue that delayed every system right-click context-menu item in Windows Explorer.
