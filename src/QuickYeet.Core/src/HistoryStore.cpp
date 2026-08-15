@@ -11,7 +11,6 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
-#include <cwctype>
 #include <fstream>
 #include <sstream>
 #include <string_view>
@@ -75,15 +74,34 @@ void SetError(std::wstring* error, const std::wstring& value) {
     }
 }
 
-std::wstring ConfigMutexName(const fs::path& storage_path) {
+std::optional<std::wstring> ConfigMutexName(const fs::path& storage_path,
+                                            std::wstring* error) {
     std::error_code absolute_error;
     fs::path normalized = fs::absolute(storage_path, absolute_error);
     if (absolute_error) {
         normalized = storage_path;
     }
     std::wstring identity = normalized.lexically_normal().wstring();
-    std::transform(identity.begin(), identity.end(), identity.begin(),
-                   [](const wchar_t character) { return std::towlower(character); });
+    if (!identity.empty()) {
+        const int lowercase_length =
+            LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, identity.data(),
+                          static_cast<int>(identity.size()), nullptr, 0, nullptr, nullptr, 0);
+        if (lowercase_length <= 0) {
+            SetError(error, L"QuickYeet could not normalize its configuration lock name: " +
+                                WindowsErrorMessage(GetLastError()));
+            return std::nullopt;
+        }
+
+        std::wstring lowercase_identity(lowercase_length, L'\0');
+        if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, identity.data(),
+                          static_cast<int>(identity.size()), lowercase_identity.data(),
+                          lowercase_length, nullptr, nullptr, 0) != lowercase_length) {
+            SetError(error, L"QuickYeet could not normalize its configuration lock name: " +
+                                WindowsErrorMessage(GetLastError()));
+            return std::nullopt;
+        }
+        identity = std::move(lowercase_identity);
+    }
 
     constexpr std::uint64_t offset = 14'695'981'039'346'656'037ULL;
     constexpr std::uint64_t prime = 1'099'511'628'211ULL;
@@ -98,8 +116,11 @@ std::wstring ConfigMutexName(const fs::path& storage_path) {
 class ConfigWriteLock {
 public:
     ConfigWriteLock(const fs::path& storage_path, std::wstring* error) {
-        const std::wstring name = ConfigMutexName(storage_path);
-        handle_ = CreateMutexW(nullptr, FALSE, name.c_str());
+        const auto name = ConfigMutexName(storage_path, error);
+        if (!name.has_value()) {
+            return;
+        }
+        handle_ = CreateMutexW(nullptr, FALSE, name->c_str());
         if (handle_ == nullptr) {
             SetError(error, L"QuickYeet could not create its configuration lock: " +
                                 WindowsErrorMessage(GetLastError()));
@@ -743,13 +764,12 @@ void HistoryStore::ApplyMutation(const PendingMutation& mutation) {
             Upsert(mutation.path).pinned = mutation.pinned;
             break;
         case MutationKind::set_alias:
-            Upsert(mutation.path).alias = CleanAlias(mutation.alias);
+            Upsert(mutation.path).alias = mutation.alias;
             break;
         case MutationKind::remove: {
-            const fs::path normalized = NormalizeDestinationPath(mutation.path);
             records_.erase(std::remove_if(records_.begin(), records_.end(),
                                           [&](const DestinationRecord& record) {
-                                              return SamePath(record.path, normalized);
+                                              return SamePath(record.path, mutation.path);
                                           }),
                            records_.end());
             break;
