@@ -74,6 +74,59 @@ void SetError(std::wstring* error, const std::wstring& value) {
     }
 }
 
+class ConfigWriteLock {
+public:
+    ConfigWriteLock(const fs::path& storage_path, std::wstring* error) {
+        std::error_code directory_error;
+        fs::create_directories(storage_path.parent_path(), directory_error);
+        if (directory_error) {
+            SetError(error, L"QuickYeet could not create its local configuration folder.");
+            return;
+        }
+
+        fs::path lock_path = storage_path;
+        lock_path += L".lock";
+        constexpr ULONGLONG wait_timeout_ms = 15'000;
+        constexpr DWORD retry_delay_ms = 25;
+        const ULONGLONG deadline = GetTickCount64() + wait_timeout_ms;
+        for (;;) {
+            handle_ = CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                  OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr);
+            if (handle_ != INVALID_HANDLE_VALUE) {
+                acquired_ = true;
+                return;
+            }
+
+            const DWORD lock_error = GetLastError();
+            if (lock_error != ERROR_SHARING_VIOLATION && lock_error != ERROR_LOCK_VIOLATION) {
+                SetError(error, L"QuickYeet could not lock its configuration: " +
+                                    WindowsErrorMessage(lock_error));
+                return;
+            }
+            if (GetTickCount64() >= deadline) {
+                SetError(error, L"QuickYeet timed out waiting to update its configuration.");
+                return;
+            }
+            Sleep(retry_delay_ms);
+        }
+    }
+
+    ~ConfigWriteLock() {
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+        }
+    }
+
+    ConfigWriteLock(const ConfigWriteLock&) = delete;
+    ConfigWriteLock& operator=(const ConfigWriteLock&) = delete;
+
+    [[nodiscard]] bool acquired() const noexcept { return acquired_; }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    bool acquired_ = false;
+};
+
 std::string_view Trim(std::string_view value) {
     while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
         value.remove_prefix(1);
@@ -511,6 +564,7 @@ std::int64_t HistoryStore::CurrentUnixTime() {
 
 bool HistoryStore::Load(std::wstring* error) {
     records_.clear();
+    pending_mutations_.clear();
     recycle_bin_enabled_ = true;
     std::ifstream input(storage_path_, std::ios::binary);
     if (!input) {
@@ -563,7 +617,45 @@ bool HistoryStore::Load(std::wstring* error) {
     return true;
 }
 
-bool HistoryStore::Save(std::wstring* error) const {
+bool HistoryStore::Save(std::wstring* error) {
+    ConfigWriteLock lock(storage_path_, error);
+    if (!lock.acquired()) {
+        return false;
+    }
+
+    std::error_code exists_error;
+    const bool configuration_exists = fs::exists(storage_path_, exists_error);
+    if (exists_error) {
+        SetError(error, L"QuickYeet could not inspect its configuration before saving.");
+        return false;
+    }
+    if (!configuration_exists && pending_mutations_.empty()) {
+        return WriteConfiguration(error);
+    }
+
+    HistoryStore merged(storage_path_);
+    if (configuration_exists) {
+        if (!merged.Load(error)) {
+            return false;
+        }
+    } else {
+        merged.recycle_bin_enabled_ = recycle_bin_enabled_;
+    }
+
+    for (const auto& mutation : pending_mutations_) {
+        merged.ApplyMutation(mutation);
+    }
+    if (!merged.WriteConfiguration(error)) {
+        return false;
+    }
+
+    records_ = std::move(merged.records_);
+    recycle_bin_enabled_ = merged.recycle_bin_enabled_;
+    pending_mutations_.clear();
+    return true;
+}
+
+bool HistoryStore::WriteConfiguration(std::wstring* error) const {
     std::error_code directory_error;
     fs::create_directories(storage_path_.parent_path(), directory_error);
     if (directory_error) {
@@ -615,40 +707,95 @@ bool HistoryStore::Save(std::wstring* error) const {
     return true;
 }
 
-DestinationRecord& HistoryStore::Upsert(const fs::path& path) {
-    const fs::path normalized = NormalizeDestinationPath(path);
+DestinationRecord* HistoryStore::FindExisting(const fs::path& normalized_path) {
     const auto existing = std::find_if(records_.begin(), records_.end(), [&](const DestinationRecord& record) {
-        return SamePath(record.path, normalized);
+        return SamePath(record.path, normalized_path);
     });
     if (existing != records_.end()) {
+        return &*existing;
+    }
+    return nullptr;
+}
+
+DestinationRecord& HistoryStore::Upsert(const fs::path& path) {
+    const fs::path normalized = NormalizeDestinationPath(path);
+    if (DestinationRecord* existing = FindExisting(normalized)) {
         return *existing;
     }
     records_.push_back({normalized});
     return records_.back();
 }
 
+void HistoryStore::ApplyMutation(const PendingMutation& mutation) {
+    switch (mutation.kind) {
+        case MutationKind::record_use: {
+            DestinationRecord& record = Upsert(mutation.path);
+            ++record.use_count;
+            record.last_used = std::max(record.last_used, mutation.used_at);
+            break;
+        }
+        case MutationKind::set_pinned: {
+            DestinationRecord* record = FindExisting(mutation.path);
+            if (record == nullptr && !mutation.requires_existing_record) {
+                record = &Upsert(mutation.path);
+            }
+            if (record != nullptr) {
+                record->pinned = mutation.pinned;
+            }
+            break;
+        }
+        case MutationKind::set_alias: {
+            DestinationRecord* record = FindExisting(mutation.path);
+            if (record == nullptr && !mutation.requires_existing_record) {
+                record = &Upsert(mutation.path);
+            }
+            if (record != nullptr) {
+                record->alias = mutation.alias;
+            }
+            break;
+        }
+        case MutationKind::remove: {
+            records_.erase(std::remove_if(records_.begin(), records_.end(),
+                                          [&](const DestinationRecord& record) {
+                                              return SamePath(record.path, mutation.path);
+                                          }),
+                           records_.end());
+            break;
+        }
+    }
+}
+
 void HistoryStore::RecordUse(const fs::path& path, const std::int64_t used_at) {
-    DestinationRecord& record = Upsert(path);
-    ++record.use_count;
-    record.last_used = used_at;
+    PendingMutation mutation{MutationKind::record_use, NormalizeDestinationPath(path)};
+    mutation.used_at = used_at;
+    ApplyMutation(mutation);
+    pending_mutations_.push_back(std::move(mutation));
 }
 
 void HistoryStore::SetPinned(const fs::path& path, const bool pinned) {
-    Upsert(path).pinned = pinned;
+    PendingMutation mutation{MutationKind::set_pinned, NormalizeDestinationPath(path)};
+    mutation.pinned = pinned;
+    mutation.requires_existing_record = FindExisting(mutation.path) != nullptr;
+    ApplyMutation(mutation);
+    pending_mutations_.push_back(std::move(mutation));
 }
 
 void HistoryStore::SetAlias(const fs::path& path, std::wstring alias) {
-    Upsert(path).alias = CleanAlias(std::move(alias));
+    PendingMutation mutation{MutationKind::set_alias, NormalizeDestinationPath(path)};
+    mutation.alias = CleanAlias(std::move(alias));
+    mutation.requires_existing_record = FindExisting(mutation.path) != nullptr;
+    ApplyMutation(mutation);
+    pending_mutations_.push_back(std::move(mutation));
 }
 
 bool HistoryStore::Remove(const fs::path& path) {
-    const fs::path normalized = NormalizeDestinationPath(path);
-    const auto old_size = records_.size();
-    records_.erase(std::remove_if(records_.begin(), records_.end(), [&](const DestinationRecord& record) {
-                       return SamePath(record.path, normalized);
-                   }),
-                   records_.end());
-    return records_.size() != old_size;
+    if (!Find(path).has_value()) {
+        return false;
+    }
+    PendingMutation mutation{MutationKind::remove, NormalizeDestinationPath(path)};
+    ApplyMutation(mutation);
+    pending_mutations_.push_back(std::move(mutation));
+    return true;
 }
 
 std::optional<DestinationRecord> HistoryStore::Find(const fs::path& path) const {

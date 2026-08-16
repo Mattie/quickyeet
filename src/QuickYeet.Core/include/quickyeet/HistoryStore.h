@@ -27,7 +27,8 @@ public:
     static std::int64_t CurrentUnixTime();
 
     bool Load(std::wstring* error = nullptr);
-    bool Save(std::wstring* error = nullptr) const;
+    // Saves this instance's pending edits without replacing changes made by another action.
+    bool Save(std::wstring* error = nullptr);
 
     void RecordUse(const std::filesystem::path& path, std::int64_t used_at = CurrentUnixTime());
     void SetPinned(const std::filesystem::path& path, bool pinned);
@@ -43,10 +44,30 @@ public:
     [[nodiscard]] const std::filesystem::path& StoragePath() const noexcept { return storage_path_; }
 
 private:
+    enum class MutationKind {
+        record_use,
+        set_pinned,
+        set_alias,
+        remove,
+    };
+
+    struct PendingMutation {
+        MutationKind kind;
+        std::filesystem::path path;
+        std::int64_t used_at = 0;
+        bool pinned = false;
+        bool requires_existing_record = false;
+        std::wstring alias;
+    };
+
+    DestinationRecord* FindExisting(const std::filesystem::path& normalized_path);
     DestinationRecord& Upsert(const std::filesystem::path& path);
+    void ApplyMutation(const PendingMutation& mutation);
+    bool WriteConfiguration(std::wstring* error) const;
 
     std::filesystem::path storage_path_;
     std::vector<DestinationRecord> records_;
+    std::vector<PendingMutation> pending_mutations_;
     bool recycle_bin_enabled_ = true;
 };
 
